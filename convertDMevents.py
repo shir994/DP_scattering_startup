@@ -8,30 +8,35 @@ import sys
 import getopt
 import time
 import lhe_parser
-import ROOT as r
+import ROOT
 import logging
 from array import array
-r.gROOT.ProcessLine('#include "Pythia8/LesHouches.h"')
+import argparse
 
 DMpdgcode = 9000007
-#DMpdgcode = 5000521
-#DMpdgcode = 22008   # Depending on the provided DM decay model
-pythia_out = "DMpythiaevents.lhe"
+# DMpdgcode = 5000521
+# DMpdgcode = 22008   # Depending on the provided DM decay model
+INITIAL_STATE = -1
+FINAL_STATE = 1
 
 
-def convertFile(inputFile):    # Convert LHE file's infos into a ROOT TTree
-    ESevent = False
-    DISevent = False
-    if inputFile.find('ES') != -1:
-        ESevent = True
-        events_lhefile = inputFile
-    elif inputFile.find('DIS') != -1:
-        DISevent = True
-        events_lhefile = runPythia(inputFile)
-    lhe = lhe_parser.EventFile(events_lhefile)    # Load LHE file
+def convertFile(input_dm_file, output_root_file='rootfile_dm.root',
+                input_hadrons_file=None):
+    '''Convert outputs of MadDump in LHE files format to
+    ROOT files, hadronizing on the way. The input file should
+    conatain DIS in name is case of DIS scattering.'''
 
-    rootfile_dm = r.TFile("rootfile_dm.root", "recreate")
-    tree_dm = r.TTree("dmtree", "dmtree")
+    ESevent = True if "ES" in input_dm_file else False
+    DISevent = True if "DIS" in input_dm_file else False
+    assert ESevent != DISevent, "Both flags are {}".format(ESevent)
+    assert DISevent == (input_hadrons_file is not None),\
+        "DIS is {0} but hadron_file is {1}".format(DISevent, input_hadrons_file)
+
+    lhe = lhe_parser.EventFile(input_dm_file)
+
+    rootfile_dm = ROOT.TFile(output_root_file, "recreate")
+    tree_dm = ROOT.TTree("dmtree", "dmtree")
+
     Edm = array('d', [0])
     pxdm = array('d', [0])
     pydm = array('d', [0])
@@ -60,33 +65,48 @@ def convertFile(inputFile):    # Convert LHE file's infos into a ROOT TTree
     tree_dm.Branch('pdg_2ry', pdg_2ry, 'pdg_2ry,/I')
     tree_dm.Branch('n_2ry', n_2ry, 'n_2ry,/I')
 
+    if DISevent:
+        print 'input file pythia: ', input_hadrons_file
+        P8gen = ROOT.TPythia8()
+        pythiagen = P8gen.Pythia8()
+        pythiagen.readString("Beams:frameType = 4")
+        pythiagen.readString("Beams:LHEF = {}".format(input_hadrons_file))
+        pythiagen.init()
+
     # Cycle over events and particles within each event
     for event in lhe:
         index = 0
         for particle in event:
-            if ESevent:
-                el[0] = ESevent
-            if DISevent:
-                dis[0] = DISevent
-            if particle.status == -1 and particle.pdg == DMpdgcode:
+            el[0] = ESevent
+            dis[0] = DISevent
+
+            if particle.status == INITIAL_STATE and particle.pdg == DMpdgcode:
                 Edm[0] = particle.E
                 pxdm[0] = particle.px
                 pydm[0] = particle.py
                 pzdm[0] = particle.pz
                 dmpdg[0] = particle.pdg
-            elif particle.status == 1 and particle.pdg != DMpdgcode:
-                E_2ry[index] = particle.E
-                #print "energy of particle # ",index, " is", E_2ry[index]
-                px_2ry[index] = particle.px
-                #print "px of particle # ",index, " is ", px_2ry[index]
-                py_2ry[index] = particle.py
-                #print "py of particle # ",index, " is ", py_2ry[index]
-                pz_2ry[index] = particle.pz
-                #print "pz of particle # ",index, " is ", pz_2ry[index]
-                pdg_2ry[index] = particle.pdg
-                #print "pdg of particle # ",index, " is ", pdg_2ry[index]
-                index += 1
-                #print '--------------------------------------------------'
+
+            if ESevent:
+                if particle.status == FINAL_STATE and particle.pdg != DMpdgcode:
+                    E_2ry[index] = particle.E
+                    px_2ry[index] = particle.px
+                    py_2ry[index] = particle.py
+                    pz_2ry[index] = particle.pz
+                    pdg_2ry[index] = particle.pdg
+                    index += 1
+
+        if DISevent:
+            if pythiagen.next():
+                for i in range(pythiagen.event.size()):
+                    if pythiagen.event[i].isFinal() and\
+                      pythiagen.event[i].id() != DMpdgcode:
+                        E_2ry[index] = pythiagen.event[i].e()
+                        px_2ry[index] = pythiagen.event[i].px()
+                        py_2ry[index] = pythiagen.event[i].py()
+                        pz_2ry[index] = pythiagen.event[i].pz()
+                        pdg_2ry[index] = pythiagen.event[i].id()
+                        index += 1
         n_2ry[0] = index
         tree_dm.Fill()
 
@@ -99,38 +119,14 @@ def convertFile(inputFile):    # Convert LHE file's infos into a ROOT TTree
     print "----------------------------------------------------------------"
     return(rootfile_dm)
 
-
-# -----------------------------------------------------------
-# Provide hadronization of free quarks in DIS events with Pythia8
-def runPythia(inputFile):
-
-    P8gen = r.TPythia8()
-    pythia = P8gen.Pythia8()
-    pythia.readString("LesHouches:matchInOut = off")
-    pythia.readString("Beams:frameType = 4")
-    pythia.readString("Beams:LHEF = "+str(inputFile))
-
-    newLHA = r.Pythia8.LHAupFromPYTHIA8(pythia.process, pythia.info)
-    newLHA.openLHEF(pythia_out)
-#   pythia.readString("SoftQCD:nonDiffractive = on")
-#   pythia.readString("HadronLevel:Hadronize = on")
-#   pythia.readString("ProcessLevel:all = off")
-#   pythia.readString(str(DMpdgcode)+":mayDecay = false")
-#   print "----Pythia8 configuration: Made DM particle stable for Pythia"
-    pythia.init()
-    newLHA.setInit()    # Store initialization info in the LHAup object.
-    newLHA.initLHEF()    # Write out this initialization info on the file.
-
-    while not pythia.info.atEndOfFile():
-        pythia.next()    # Generate events, and check whether generation failed
-        newLHA.setEvent()    # Store event info in the LHAup object
-        newLHA.eventLHEF()    # Write out this event info on the file
-
-    pythia.stat()
-    newLHA.updateSigma()    # Update cross section info based on MC integration during run
-    newLHA.closeLHEF(True)
-
-    print '---------------------------end pythia'
-    return(pythia_out)
-
-# ------------------------------------------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Select events in neutrino files",
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("-i", dest='dm_file', type=str, help="Input DM file")
+    parser.add_argument("-d", dest='h_hfile', type=str, help="Input hadron file",
+                        default=None)
+    parser.add_argument("-o", dest='o_hfile', type=str, help="Output file",
+                        default='rootfile_dm.root')
+    args = parser.parse_args()
+    print(args.h_hfile)
+    convertFile(args.dm_file, args.o_hfile, args.h_hfile)
